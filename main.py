@@ -10,8 +10,8 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
 
 MAX_WORKERS = 10
 HISTORY_FILE = 'history.csv'
