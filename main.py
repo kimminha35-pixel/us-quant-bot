@@ -88,24 +88,37 @@ def fetch_evidence(ticker, start_date, end_date):
 # ==========================================
 def manage_historical_data(today_df):
     if os.path.exists(HISTORY_FILE):
-        history_df = pd.read_csv(HISTORY_FILE)
+        try:
+            history_df = pd.read_csv(HISTORY_FILE)
+            # 🌟 [수정 포인트] 날짜 형식이 섞여 있어도 자동으로 파악해서 읽도록 설정
+            history_df['Date'] = pd.to_datetime(history_df['Date'], format='mixed', errors='coerce')
+        except Exception as e:
+            print(f"기존 데이터 로드 중 오류 발생: {e}. 새로 시작합니다.")
+            history_df = pd.DataFrame()
     else:
         history_df = pd.DataFrame()
         
     if not history_df.empty:
-        history_df['Date'] = pd.to_datetime(history_df['Date'])
+        # NaT(날짜 읽기 실패) 데이터 제거
+        history_df = history_df.dropna(subset=['Date'])
+        
+        # 오늘 날짜를 시간 없이 날짜만 가져오기
         today_date = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
         today_prices = today_df.set_index('Ticker')['Close'].to_dict()
         
         for idx, row in history_df.iterrows():
             if pd.isna(row.get('Target')):
-                # 20거래일(약 한 달) 뒤 결과 채점
-                if (today_date - row['Date']).days >= 20:
+                # 날짜 차이 계산 (시간 정보가 있어도 날짜 단위로 비교)
+                days_passed = (today_date - pd.to_datetime(row['Date'])).days
+                if days_passed >= 20:
                     ticker = row['Ticker']
                     if ticker in today_prices:
                         ret = (today_prices[ticker] / row['Close']) - 1
                         history_df.at[idx, 'Target'] = 1 if ret > 0.05 else 0
 
+    # 데이터 합치기 전 오늘 데이터의 날짜 형식도 통일
+    today_df['Date'] = pd.to_datetime(today_df['Date'])
+    
     updated_history = pd.concat([history_df, today_df], ignore_index=True).drop_duplicates(subset=['Date', 'Ticker'], keep='last')
     updated_history.to_csv(HISTORY_FILE, index=False)
     return updated_history
