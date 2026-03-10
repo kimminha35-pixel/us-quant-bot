@@ -35,7 +35,7 @@ def get_broad_universe():
         return ["NVDA", "AAPL", "MSFT", "AMD", "TSLA", "META", "AMZN", "PLTR", "AVGO", "SMCI"]
 
 # ==========================================
-# 2. 증거 수집
+# 2. 증거 수집 (과거 Q4 데이터 배제, 미래 Revision 집중)
 # ==========================================
 def fetch_evidence(ticker, start_date, end_date):
     try:
@@ -43,7 +43,7 @@ def fetch_evidence(ticker, start_date, end_date):
         info = stock.info
         
         mkt_cap = info.get('marketCap', 0)
-        if mkt_cap < 750_000_000: return None # 시총 1조 이상
+        if mkt_cap < 750_000_000: return None # 시총 1조 원 이상
         
         sector = info.get('sector', 'Unknown')
         if sector in EXCLUDED_SECTORS: return None
@@ -54,37 +54,29 @@ def fetch_evidence(ticker, start_date, end_date):
             
         close_px = hist['Close'].iloc[-1]
         
+        # 추세: 20일선 > 60일선
         ma20 = hist['Close'].rolling(20).mean().iloc[-1]
         ma60 = hist['Close'].rolling(60).mean().iloc[-1]
         trend_ok = 1 if (close_px > ma20 > ma60) else 0
         
-        ma20_disparity = (close_px / ma20) * 100 if ma20 > 0 else 100
-        
-        eps_surp = info.get('earningsQuarterlyGrowth', 0) * 100
+        # [핵심] 1분기 서프라이즈 기대감은 '연간 Forward EPS'의 급격한 상향으로 나타납니다.
         eps_trl = info.get('trailingEps', 0.1)
         eps_fwd = info.get('forwardEps', 0)
         revision = ((eps_fwd - eps_trl) / abs(eps_trl)) * 100 if eps_trl != 0 else 0
         
-        price_1m = hist['Close'].iloc[-21]
         price_3m = hist['Close'].iloc[-63]
-        mom_1m = ((close_px / price_1m) - 1) * 100
         mom_3m = ((close_px / price_3m) - 1) * 100
-        
-        current_month = datetime.now().month
-        is_q1_season = 1 if current_month in [2, 3, 4, 5] else 0
         
         return {
             'Date': datetime.now().strftime("%Y-%m-%d"),
             'Ticker': ticker, 'Name': name, 'Sector': sector, 'Close': close_px,
-            'Trend_OK': trend_ok, 'MA20_Disparity': ma20_disparity,
-            'EPS_Surprise': eps_surp, 'Revision_Strength': revision,
-            'Mom_1M': mom_1m, 'Mom_3M': mom_3m, 'Is_Q1_Season': is_q1_season,
-            'Target': np.nan
+            'Trend_OK': trend_ok, 'Revision_Strength': revision,
+            'Mom_3M': mom_3m, 'Target': np.nan
         }
     except: return None
 
 # ==========================================
-# 3. 데이터 관리 및 리스크 반영 자동 채점
+# 3. 데이터 관리 (리스크 관리: -12% 이탈 시 오답 처리)
 # ==========================================
 def manage_historical_data(today_df):
     if os.path.exists(HISTORY_FILE):
@@ -121,12 +113,11 @@ def manage_historical_data(today_df):
                             max_px = float(period_data.max())
                             last_px = float(period_data.iloc[-1])
                             
-                            # 🌟 [수정됨] 미국장 변동성 및 주도주 추세 철학 반영
-                            if min_px <= buy_price * 0.88:  # -12% 이탈 시 추세 붕괴 (0점)
+                            if min_px <= buy_price * 0.88:  # 추세 완전 이탈 (-12%)
                                 history_df.at[idx, 'Target'] = 0
-                            elif max_px >= buy_price * 1.15 or last_px >= buy_price * 1.08: # 15% 이상 슈팅 or 8% 이상 수익 유지 (1점)
+                            elif max_px >= buy_price * 1.15 or last_px >= buy_price * 1.08: 
                                 history_df.at[idx, 'Target'] = 1
-                            else: # 지지부진한 횡보 (0점)
+                            else: 
                                 history_df.at[idx, 'Target'] = 0
             except Exception as e:
                 print(f"채점 중 에러: {e}")
@@ -141,15 +132,13 @@ def manage_historical_data(today_df):
 # ==========================================
 def dynamic_ml_filter(history_df, today_df):
     train_data = history_df.dropna(subset=['Target'])
-    features = ['Trend_OK', 'MA20_Disparity', 'EPS_Surprise', 'Revision_Strength', 'Mom_1M', 'Mom_3M', 'Is_Q1_Season']
+    features = ['Trend_OK', 'Revision_Strength', 'Mom_3M']
     
     if len(train_data) < 100:
-        q1_bonus = today_df['Is_Q1_Season'] * 0.2
         rev_norm = np.clip(today_df['Revision_Strength'] / 100, 0, 1)
-        mom_norm = np.clip(today_df['Mom_1M'] / 30, 0, 1)
-        disp_score = np.where((today_df['MA20_Disparity'] > 100) & (today_df['MA20_Disparity'] < 110), 0.3, 0)
-        
-        today_df['Raw_Prob'] = (today_df['Trend_OK'] * 0.3) + (rev_norm * (0.2 + q1_bonus)) + (mom_norm * 0.2) + disp_score
+        mom_norm = np.clip(today_df['Mom_3M'] / 50, 0, 1)
+        # 과거 실적 변수 삭제, 순수하게 추세와 추정치 상향에만 집중
+        today_df['Raw_Prob'] = (today_df['Trend_OK'] * 0.5) + (rev_norm * 0.25) + (mom_norm * 0.25)
     else:
         clf = HistGradientBoostingClassifier(random_state=42).fit(train_data[features].fillna(0), train_data['Target'].astype(int))
         today_df['Raw_Prob'] = clf.predict_proba(today_df[features].fillna(0))[:, 1]
@@ -166,21 +155,20 @@ def send_telegram(df):
     today_str = datetime.now().strftime("%Y-%m-%d")
     
     msg = f"💎 *{today_str} 미장 주도주 AI 리포트* 💎\n"
-    msg += "_(시총 1조 이상 전수조사 & 추세 추종 로직)_\n\n"
+    msg += "_(시총 1조 이상 전수조사)_\n\n"
     
     for i, (_, row) in enumerate(df.head(top_n).iterrows(), 1):
-        is_star = (row['AI_Score'] >= 90.0) and (row['Trend_OK'] == 1) and (row['MA20_Disparity'] < 115)
+        is_star = (row['AI_Score'] >= 90.0) and (row['Trend_OK'] == 1)
         mark = "🚀" if is_star else "⚠️"
         
         msg += f"*{i}. {row['Name']}* ({row['Ticker']}) {mark}\n"
-        msg += f"🎯 *AI 랭킹:* {row['AI_Score']:.1f}점 (이격도: {row['MA20_Disparity']:.1f}%)\n"
+        msg += f"🎯 *AI 랭킹:* {row['AI_Score']:.1f}점\n"
         
         evidences = []
-        if row['Is_Q1_Season'] == 1 and row['Revision_Strength'] > 10: evidences.append(f"1Q 강력 리비전(+{row['Revision_Strength']:.0f}%)")
-        elif row['Revision_Strength'] > 10: evidences.append(f"리비전(+{row['Revision_Strength']:.0f}%)")
+        if row['Revision_Strength'] > 15: evidences.append(f"강력 연간리비전(+{row['Revision_Strength']:.0f}%)")
+        elif row['Revision_Strength'] > 0: evidences.append(f"추정치상향(+{row['Revision_Strength']:.0f}%)")
         
-        if row['EPS_Surprise'] > 10: evidences.append(f"어닝서프({row['EPS_Surprise']:.0f}%)")
-        if row['Mom_1M'] > 15: evidences.append(f"최근급등(+{row['Mom_1M']:.0f}%)")
+        if row['Mom_3M'] > 20: evidences.append(f"강력모멘텀(+{row['Mom_3M']:.0f}%)")
         evidences.append("정배열" if row['Trend_OK'] == 1 else "역배열(주의)")
         
         msg += f"🧾 *상태:* {', '.join(evidences)}\n\n"
