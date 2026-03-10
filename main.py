@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import requests
 import os
-import time
 from datetime import datetime, timedelta
 from sklearn.ensemble import HistGradientBoostingClassifier
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,37 +18,32 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
 MAX_WORKERS = 20 
 HISTORY_FILE = 'history.csv'
 
-# 제외 섹터: 금융, 유틸리티, 리츠, 소재 (주도주 성격이 약함)
 EXCLUDED_SECTORS = ['Financial Services', 'Utilities', 'Real Estate', 'Basic Materials']
 
 def get_broad_universe():
-    print("🚀 미국 전종목 티커(NASDAQ/NYSE/AMEX) 수집 시작...")
+    print("🚀 미국 전종목 티커 수집 시작...")
     try:
         url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
         response = requests.get(url)
         if response.status_code == 200:
             tickers = response.text.split('\n')
-            # 티커 정제 (공백 제거, 점을 하이픈으로 변경)
             tickers = [t.strip().replace('.', '-') for t in tickers if t.strip() and len(t.strip()) <= 5]
             print(f"✅ 총 {len(tickers)}개 티커 확보!")
             return tickers
-        else: raise Exception("티커 서버 응답 없음")
     except Exception as e:
         print(f"❌ 수집 실패: {e}")
         return ["NVDA", "AAPL", "MSFT", "AMD", "TSLA", "META", "AMZN", "PLTR", "AVGO", "SMCI"]
 
 # ==========================================
-# 2. 증거 수집 (시총 1조 이상 필터링)
+# 2. 증거 수집
 # ==========================================
 def fetch_evidence(ticker, start_date, end_date):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
         
-        # 🌟 [핵심] 시가총액 필터: 1조 원 이상 (약 7.5억 달러 기준)
-        # 1,000,000,000,000 KRW ≒ 750,000,000 USD
         mkt_cap = info.get('marketCap', 0)
-        if mkt_cap < 750_000_000: return None
+        if mkt_cap < 750_000_000: return None # 시총 1조 이상
         
         sector = info.get('sector', 'Unknown')
         if sector in EXCLUDED_SECTORS: return None
@@ -60,92 +54,111 @@ def fetch_evidence(ticker, start_date, end_date):
             
         close_px = hist['Close'].iloc[-1]
         
-        # 추세 증거: 20일선 > 60일선 (정배열)
         ma20 = hist['Close'].rolling(20).mean().iloc[-1]
         ma60 = hist['Close'].rolling(60).mean().iloc[-1]
         trend_ok = 1 if (close_px > ma20 > ma60) else 0
         
-        # 실적 증거: 전년비 분기 성장률(서프) 및 가이던스(리비전)
+        ma20_disparity = (close_px / ma20) * 100 if ma20 > 0 else 100
+        
         eps_surp = info.get('earningsQuarterlyGrowth', 0) * 100
         eps_trl = info.get('trailingEps', 0.1)
         eps_fwd = info.get('forwardEps', 0)
         revision = ((eps_fwd - eps_trl) / abs(eps_trl)) * 100 if eps_trl != 0 else 0
         
-        # 수급 증거: 최근 3개월 수익률(모멘텀)
+        price_1m = hist['Close'].iloc[-21]
         price_3m = hist['Close'].iloc[-63]
+        mom_1m = ((close_px / price_1m) - 1) * 100
         mom_3m = ((close_px / price_3m) - 1) * 100
+        
+        current_month = datetime.now().month
+        is_q1_season = 1 if current_month in [2, 3, 4, 5] else 0
         
         return {
             'Date': datetime.now().strftime("%Y-%m-%d"),
             'Ticker': ticker, 'Name': name, 'Sector': sector, 'Close': close_px,
-            'Trend_OK': trend_ok, 'EPS_Surprise': eps_surp, 'Revision_Strength': revision,
-            'Mom_3M': mom_3m, 'Target': np.nan
+            'Trend_OK': trend_ok, 'MA20_Disparity': ma20_disparity,
+            'EPS_Surprise': eps_surp, 'Revision_Strength': revision,
+            'Mom_1M': mom_1m, 'Mom_3M': mom_3m, 'Is_Q1_Season': is_q1_season,
+            'Target': np.nan
         }
     except: return None
 
 # ==========================================
-# 3. 데이터 관리 및 학습 (History)
+# 3. 데이터 관리 및 리스크 반영 자동 채점
 # ==========================================
 def manage_historical_data(today_df):
     if os.path.exists(HISTORY_FILE):
         try:
             history_df = pd.read_csv(HISTORY_FILE)
-            # 🌟 [수정 포인트] 날짜 형식이 섞여 있어도 자동으로 파악해서 읽도록 설정
             history_df['Date'] = pd.to_datetime(history_df['Date'], format='mixed', errors='coerce')
-        except Exception as e:
-            print(f"기존 데이터 로드 중 오류 발생: {e}. 새로 시작합니다.")
-            history_df = pd.DataFrame()
-    else:
-        history_df = pd.DataFrame()
+        except: history_df = pd.DataFrame()
+    else: history_df = pd.DataFrame()
         
     if not history_df.empty:
-        # NaT(날짜 읽기 실패) 데이터 제거
         history_df = history_df.dropna(subset=['Date'])
-        
-        # 오늘 날짜를 시간 없이 날짜만 가져오기
         today_date = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
-        today_prices = today_df.set_index('Ticker')['Close'].to_dict()
         
-        for idx, row in history_df.iterrows():
-            if pd.isna(row.get('Target')):
-                # 날짜 차이 계산 (시간 정보가 있어도 날짜 단위로 비교)
-                days_passed = (today_date - pd.to_datetime(row['Date'])).days
-                if days_passed >= 20:
+        tickers_to_update = history_df[history_df['Target'].isna() & ((today_date - history_df['Date']).dt.days >= 20)]
+        
+        if not tickers_to_update.empty:
+            t_list = tickers_to_update['Ticker'].unique().tolist()
+            try:
+                hist_data = yf.download(t_list, period="1mo", progress=False, show_errors=False)
+                close_data = hist_data['Close'] if 'Close' in hist_data else hist_data
+                if isinstance(close_data, pd.Series): close_data = close_data.to_frame(name=t_list[0])
+                
+                for idx, row in tickers_to_update.iterrows():
                     ticker = row['Ticker']
-                    if ticker in today_prices:
-                        ret = (today_prices[ticker] / row['Close']) - 1
-                        history_df.at[idx, 'Target'] = 1 if ret > 0.05 else 0
+                    buy_date = pd.to_datetime(row['Date'])
+                    buy_price = row['Close']
+                    
+                    if ticker in close_data.columns:
+                        period_data = close_data[ticker].dropna()
+                        period_data = period_data[period_data.index.tz_localize(None) >= buy_date]
+                        
+                        if not period_data.empty:
+                            min_px = float(period_data.min())
+                            max_px = float(period_data.max())
+                            last_px = float(period_data.iloc[-1])
+                            
+                            # 🌟 [수정됨] 미국장 변동성 및 주도주 추세 철학 반영
+                            if min_px <= buy_price * 0.88:  # -12% 이탈 시 추세 붕괴 (0점)
+                                history_df.at[idx, 'Target'] = 0
+                            elif max_px >= buy_price * 1.15 or last_px >= buy_price * 1.08: # 15% 이상 슈팅 or 8% 이상 수익 유지 (1점)
+                                history_df.at[idx, 'Target'] = 1
+                            else: # 지지부진한 횡보 (0점)
+                                history_df.at[idx, 'Target'] = 0
+            except Exception as e:
+                print(f"채점 중 에러: {e}")
 
-    # 데이터 합치기 전 오늘 데이터의 날짜 형식도 통일
     today_df['Date'] = pd.to_datetime(today_df['Date'])
-    
     updated_history = pd.concat([history_df, today_df], ignore_index=True).drop_duplicates(subset=['Date', 'Ticker'], keep='last')
     updated_history.to_csv(HISTORY_FILE, index=False)
     return updated_history
 
 # ==========================================
-# 4. 동태적 분석 및 AI 스코어링
+# 4. 동태적 학습 필터
 # ==========================================
 def dynamic_ml_filter(history_df, today_df):
     train_data = history_df.dropna(subset=['Target'])
-    features = ['Trend_OK', 'EPS_Surprise', 'Revision_Strength', 'Mom_3M']
+    features = ['Trend_OK', 'MA20_Disparity', 'EPS_Surprise', 'Revision_Strength', 'Mom_1M', 'Mom_3M', 'Is_Q1_Season']
     
-    # 학습 데이터 부족 시(첫 한 달) 가중치 기반 우선 순위
     if len(train_data) < 100:
+        q1_bonus = today_df['Is_Q1_Season'] * 0.2
         rev_norm = np.clip(today_df['Revision_Strength'] / 100, 0, 1)
-        mom_norm = np.clip(today_df['Mom_3M'] / 50, 0, 1)
-        today_df['Raw_Prob'] = (today_df['Trend_OK'] * 0.5) + (rev_norm * 0.25) + (mom_norm * 0.25)
+        mom_norm = np.clip(today_df['Mom_1M'] / 30, 0, 1)
+        disp_score = np.where((today_df['MA20_Disparity'] > 100) & (today_df['MA20_Disparity'] < 110), 0.3, 0)
+        
+        today_df['Raw_Prob'] = (today_df['Trend_OK'] * 0.3) + (rev_norm * (0.2 + q1_bonus)) + (mom_norm * 0.2) + disp_score
     else:
-        # 데이터가 쌓이면 정답(Target) 기반 머신러닝 가동
         clf = HistGradientBoostingClassifier(random_state=42).fit(train_data[features].fillna(0), train_data['Target'].astype(int))
         today_df['Raw_Prob'] = clf.predict_proba(today_df[features].fillna(0))[:, 1]
     
-    # 시장 내 상대 점수 (백분위 0~100점)
     today_df['AI_Score'] = today_df['Raw_Prob'].rank(pct=True) * 100
     return today_df.sort_values('AI_Score', ascending=False)
 
 # ==========================================
-# 5. 텔레그램 리포트 발송
+# 5. 텔레그램 발송
 # ==========================================
 def send_telegram(df):
     if df.empty: return
@@ -153,19 +166,21 @@ def send_telegram(df):
     today_str = datetime.now().strftime("%Y-%m-%d")
     
     msg = f"💎 *{today_str} 미장 주도주 AI 리포트* 💎\n"
-    msg += "_(시총 1조 이상 전수조사 결과)_\n\n"
+    msg += "_(시총 1조 이상 전수조사 & 추세 추종 로직)_\n\n"
     
     for i, (_, row) in enumerate(df.head(top_n).iterrows(), 1):
-        is_star = (row['AI_Score'] >= 90.0) and (row['Trend_OK'] == 1)
+        is_star = (row['AI_Score'] >= 90.0) and (row['Trend_OK'] == 1) and (row['MA20_Disparity'] < 115)
         mark = "🚀" if is_star else "⚠️"
         
         msg += f"*{i}. {row['Name']}* ({row['Ticker']}) {mark}\n"
-        msg += f"🎯 *AI 점수:* {row['AI_Score']:.1f}점\n"
+        msg += f"🎯 *AI 랭킹:* {row['AI_Score']:.1f}점 (이격도: {row['MA20_Disparity']:.1f}%)\n"
         
         evidences = []
-        if row['Revision_Strength'] > 10: evidences.append(f"리비전(+{row['Revision_Strength']:.0f}%)")
+        if row['Is_Q1_Season'] == 1 and row['Revision_Strength'] > 10: evidences.append(f"1Q 강력 리비전(+{row['Revision_Strength']:.0f}%)")
+        elif row['Revision_Strength'] > 10: evidences.append(f"리비전(+{row['Revision_Strength']:.0f}%)")
+        
         if row['EPS_Surprise'] > 10: evidences.append(f"어닝서프({row['EPS_Surprise']:.0f}%)")
-        if row['Mom_3M'] > 15: evidences.append(f"강력시세(+{row['Mom_3M']:.0f}%)")
+        if row['Mom_1M'] > 15: evidences.append(f"최근급등(+{row['Mom_1M']:.0f}%)")
         evidences.append("정배열" if row['Trend_OK'] == 1 else "역배열(주의)")
         
         msg += f"🧾 *상태:* {', '.join(evidences)}\n\n"
@@ -176,7 +191,6 @@ def send_telegram(df):
 if __name__ == "__main__":
     universe = get_broad_universe()
     results = []
-    # 4,000개 이상 스캔을 위해 멀티스레딩 활용
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(fetch_evidence, t, datetime.now()-timedelta(days=120), datetime.now()): t for t in universe}
         for f in as_completed(futures):
