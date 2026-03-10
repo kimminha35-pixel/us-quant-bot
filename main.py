@@ -166,17 +166,17 @@ def dynamic_ml_filter(history_df, today_df):
 
 def send_telegram(df):
     if df.empty:
-        msg = "📉 *오늘의 리포트*\n\n현재 시장에 AI의 엄격한 기준을 통과한 주도주가 없습니다.\n(하락장 우려. 현금 보유 권장)"
+        msg = "오늘의 리포트\n\n현재 시장에 AI의 엄격한 기준을 통과한 주도주가 없습니다.\n(하락장 우려. 현금 보유 권장)"
     else:
         top_n = min(7, len(df))
         today_str = datetime.now().strftime("%Y-%m-%d")
         
-        msg = f"🔥 *{today_str} 진화형 AI 주도주 픽* 🔥\n"
-        msg += f"_(과거 데이터를 스스로 학습해 확률을 도출합니다)_\n\n"
+        msg = f"🔥 {today_str} 진화형 AI 주도주 픽 🔥\n"
+        msg += f"(과거 데이터를 스스로 학습해 확률을 도출합니다)\n\n"
         
         for i, (ticker, row) in enumerate(df.head(top_n).iterrows(), 1):
-            msg += f"*{i}. {ticker}* ({row['Sector']})\n"
-            msg += f"🎯 *AI 합격률:* {row['AI_Prob']:.1f}%\n"
+            msg += f"{i}. {ticker} ({row['Sector']})\n"
+            msg += f"🎯 AI 합격률: {row['AI_Prob']:.1f}%\n"
             
             evidences = []
             if row['Revision_Strength'] > 15: evidences.append(f"가이던스 대폭상향(+{row['Revision_Strength']:.0f}%)")
@@ -184,11 +184,17 @@ def send_telegram(df):
             if row['EPS_Surprise'] > 10: evidences.append(f"어닝서프({row['EPS_Surprise']:.0f}%)")
             if row['Mom_3M'] > 20: evidences.append(f"강력한 모멘텀(+{row['Mom_3M']:.0f}%)")
             
-            msg += f"🧾 *증거:* {', '.join(evidences)}\n\n"
+            msg += f"🧾 증거: {', '.join(evidences)}\n\n"
             
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={'chat_id': TELEGRAM_CHAT_ID, 'text': msg, 'parse_mode': 'Markdown'})
-    print("텔레그램 발송 완료!")
+    # parse_mode 삭제 및 에러 응답 확인 로직 추가
+    response = requests.post(url, json={'chat_id': TELEGRAM_CHAT_ID, 'text': msg})
+    
+    if response.status_code == 200:
+        print("텔레그램 발송 성공!")
+    else:
+        print(f"텔레그램 발송 실패!! (에러코드 {response.status_code})")
+        print(f"상세 이유: {response.text}")
 
 if __name__ == "__main__":
     universe = get_broad_universe()
