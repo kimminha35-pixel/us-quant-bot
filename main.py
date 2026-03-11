@@ -5,7 +5,7 @@ import requests
 import os
 import time
 from datetime import datetime, timedelta
-from sklearn.ensemble import HistGradientBoostingRegressor 
+from sklearn.ensemble import HistGradientBoostingRegressor
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
 
@@ -23,17 +23,38 @@ EXCLUDED_SECTORS = ['Financial Services', 'Utilities', 'Real Estate', 'Basic Mat
 
 def get_broad_universe():
     print("🚀 미국 전종목 티커 수집 시작...")
+    
+    # 🟢 [Plan A] 기존 고속 GitHub 리스트
     try:
-        url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
-        response = requests.get(url)
-        if response.status_code == 200:
-            tickers = response.text.split('\n')
-            tickers = [t.strip().replace('.', '-') for t in tickers if t.strip() and len(t.strip()) <= 5]
-            print(f"✅ 총 {len(tickers)}개 티커 확보!")
+        url_a = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
+        res_a = requests.get(url_a, timeout=10)
+        if res_a.status_code == 200:
+            tickers = [t.strip().replace('.', '-') for t in res_a.text.split('\n') if t.strip() and len(t.strip()) <= 5]
+            if len(tickers) > 1000:
+                print(f"✅ [Plan A 성공] 총 {len(tickers)}개 티커 확보!")
+                return tickers
+    except Exception as e:
+        print(f"⚠️ Plan A 실패: {e}")
+
+    # 🟡 [Plan B] 미국 SEC(증권거래위원회) 공식 데이터베이스 (방어 로직)
+    print("🔄 [Plan B 가동] 미국 SEC 공식 데이터베이스에서 직접 추출합니다...")
+    try:
+        # SEC 서버는 봇 접근을 막을 수 있으므로 브라우저인 척 위장
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        url_b = "https://www.sec.gov/files/company_tickers.json"
+        res_b = requests.get(url_b, headers=headers, timeout=10)
+        
+        if res_b.status_code == 200:
+            data = res_b.json()
+            # SEC 데이터에서 티커만 추출 후 중복 제거
+            tickers = [v['ticker'].replace('.', '-') for v in data.values()]
+            tickers = list(set(tickers)) 
+            print(f"✅ [Plan B 성공] SEC 공식 티커 {len(tickers)}개 확보!")
             return tickers
     except Exception as e:
-        print(f"❌ 수집 실패: {e}")
-        return ["NVDA", "AAPL", "MSFT", "AMD", "TSLA", "META", "AMZN", "PLTR", "AVGO", "SMCI"]
+        print(f"❌ Plan B마저 실패: {e}")
+        
+    return [] # 미국 정부 서버까지 터지는 초유의 사태에만 빈 리스트 반환
 
 def get_market_baseline():
     try:
@@ -163,7 +184,7 @@ def dynamic_ml_filter(history_df, today_df):
 # ==========================================
 def send_telegram(df):
     if df.empty: return
-    top_n = 7 # 🌟 상위 7개씩 출력으로 변경
+    top_n = 7
     today_str = datetime.now().strftime("%Y-%m-%d")
     
     msg = f"💎 *{today_str} 미장 주도주 스캐너* 💎\n\n"
@@ -204,6 +225,15 @@ def send_telegram(df):
 
 if __name__ == "__main__":
     universe = get_broad_universe()
+    
+    # 🌟 [수정 완료] 수집 서버 1, 2안 모두 터졌을 때 깔끔하게 에러 뱉고 종료
+    if not universe:
+        error_msg = "🚨 *시스템 알림*\n외부 티커 수집 서버에 일시적 문제가 발생하여 오늘 AI 스캔을 건너뜁니다."
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                      json={'chat_id': TELEGRAM_CHAT_ID, 'text': error_msg, 'parse_mode': 'Markdown'})
+        print("티커 수집 실패로 작업을 종료합니다.")
+        exit()
+        
     spy_ret_3m = get_market_baseline() 
     
     results = []
