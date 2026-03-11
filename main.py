@@ -170,14 +170,14 @@ def send_telegram(df):
     
     # --- [트랙 1] 기본 룰 랭킹 ---
     rule_df = df.sort_values('Rule_Score', ascending=False).head(top_n)
-    msg += "🏆 *[기본 룰 랭킹]* (회원님 알고리즘 100%)\n"
+    msg += "🏆 *[기본 룰 랭킹]*\n"
     
     for i, (_, row) in enumerate(rule_df.iterrows(), 1):
         is_target = (row['Rule_Score'] >= 90.0) and (row['Trend_OK'] == 1) and (99 <= row['MA20_Disparity'] <= 105)
         mark = "🎯" if is_target else "✅"
         
         msg += f"*{i}. {row['Name']}* ({row['Ticker']}) {mark}\n"
-        msg += f"📊 룰 점수: {row['Rule_Score']:.1f}점\n"
+        msg += f"📊 북 점수: {row['Rule_Score']:.1f}점\n"
         
         trend_str = "정배열" if row['Trend_OK'] == 1 else "역배열"
         msg += f"🧾 리비전 {row['Revision_Strength']:.1f}% | RS {row['RS_Rating']:.1f}% | 수급 {row['Volume_Breakout']:.1f}x | 이격도 {row['MA20_Disparity']:.1f}% ({trend_str})\n\n"
