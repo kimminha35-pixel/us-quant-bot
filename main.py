@@ -166,7 +166,7 @@ def send_telegram(df):
     top_n = 7 # 🌟 상위 7개씩 출력으로 변경
     today_str = datetime.now().strftime("%Y-%m-%d")
     
-    msg = f"💎 *{today_str} 미장 1Q 서프라이즈 스캐너* 💎\n\n"
+    msg = f"💎 *{today_str} 미장 주도주 스캐너* 💎\n\n"
     
     # --- [트랙 1] 기본 룰 랭킹 ---
     rule_df = df.sort_values('Rule_Score', ascending=False).head(top_n)
