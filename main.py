@@ -72,7 +72,7 @@ def fetch_evidence(ticker, start_date, end_date, spy_ret_3m):
         stock = yf.Ticker(ticker)
         info = stock.info
         
-        if info.get('marketCap', 0) < 750_000_000: return None
+        if info.get('marketCap', 0) < 2_000_000_000: return None
         sector = info.get('sector', 'Unknown')
         if sector in EXCLUDED_SECTORS: return None
         
