@@ -5,14 +5,17 @@ on:
     - cron: '0 22 * * *' # 매일 한국 시간 오전 7시
   workflow_dispatch:
 
+env: # 🌟 여기에 넣으면 모든 단계에서 경고가 사라집니다!
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
     - name: 저장소 코드 가져오기
-      uses: actions/checkout@v4 # 🌟 v3에서 v4로 업데이트
+      uses: actions/checkout@v4 
     - name: 파이썬 3.10 세팅
-      uses: actions/setup-python@v5 # 🌟 v4에서 v5로 업데이트
+      uses: actions/setup-python@v5 
       with:
         python-version: '3.10'
     - name: 필수 패키지 설치
@@ -23,7 +26,6 @@ jobs:
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       run: |
         python main.py
     - name: 학습 데이터(history.csv) 깃허브에 자동 저장
