@@ -19,7 +19,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
 MAX_WORKERS = 20 
 HISTORY_FILE = 'history.csv'
 
-EXCLUDED_SECTORS = ['Financial Services', 'Utilities', 'Real Estate', 'Basic Materials']
+EXCLUDED_SECTORS = ['Financial Services', 'Utilities', 'Real Estate', 'Basic Materials', 'Healthcare']
 
 def get_broad_universe():
     print("🚀 미국 전종목 티커 수집 시작...")
@@ -184,7 +184,7 @@ def dynamic_ml_filter(history_df, today_df):
 # ==========================================
 def send_telegram(df):
     if df.empty: return
-    top_n = 7
+    top_n = 10
     today_str = datetime.now().strftime("%Y-%m-%d")
     
     msg = f"💎 *{today_str} 미장 주도주 스캐너* 💎\n\n"
