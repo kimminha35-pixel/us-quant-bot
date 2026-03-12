@@ -23,6 +23,7 @@ jobs:
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       run: |
         python main.py
     - name: 학습 데이터(history.csv) 깃허브에 자동 저장
