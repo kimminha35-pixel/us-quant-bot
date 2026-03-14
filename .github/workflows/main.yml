@@ -2,7 +2,7 @@ name: US Quant Daily Bot
 
 on:
   schedule:
-    - cron: '0 22 * * *' # 매일 한국 시간 오전 7시
+    - cron: '0 22 * * 0-4' # 🌟 1-5를 0-4로 변경!
   workflow_dispatch:
 
 env: # 🌟 여기에 넣으면 모든 단계에서 경고가 사라집니다!
