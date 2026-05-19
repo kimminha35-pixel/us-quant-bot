@@ -74,48 +74,46 @@ def fetch_evidence(ticker, start_date, end_date, spy_ret_3m):
             hist = stock.history(start=start_date, end=end_date)
             if len(hist) < 65: return None
 
-        close_px = hist['Close'].iloc[-1]
+            close_px = hist['Close'].iloc[-1]
 
-        ma20 = hist['Close'].rolling(20).mean().iloc[-1]
-        ma60 = hist['Close'].rolling(60).mean().iloc[-1]
-        trend_ok = 1 if (close_px > ma20 > ma60) else 0
+            ma20 = hist['Close'].rolling(20).mean().iloc[-1]
+            ma60 = hist['Close'].rolling(60).mean().iloc[-1]
+            trend_ok = 1 if (close_px > ma20 > ma60) else 0
 
-        eps_trl = info.get('trailingEps', 0.1)
-        eps_fwd = info.get('forwardEps', 0)
-        # 기존 스프레드 (폴백용으로 유지)
-        eps_growth = ((eps_fwd - eps_trl) / abs(eps_trl)) * 100 if eps_trl != 0 else 0
+            eps_trl = info.get('trailingEps', 0.1)
+            eps_fwd = info.get('forwardEps', 0)
+            eps_growth = ((eps_fwd - eps_trl) / abs(eps_trl)) * 100 if eps_trl != 0 else 0
 
-        price_3m = hist['Close'].iloc[-63]
-        mom_3m = ((close_px / price_3m) - 1) * 100
+            price_3m = hist['Close'].iloc[-63]
+            mom_3m = ((close_px / price_3m) - 1) * 100
 
-        ma20_disparity = (close_px / ma20) * 100 if ma20 > 0 else 100
-        rs_rating = mom_3m - spy_ret_3m
-        vol_5d = hist['Volume'].iloc[-5:].mean()
-        vol_60d = hist['Volume'].iloc[-60:].mean()
-        vol_breakout = (vol_5d / vol_60d) if vol_60d > 0 else 1.0
+            ma20_disparity = (close_px / ma20) * 100 if ma20 > 0 else 100
+            rs_rating = mom_3m - spy_ret_3m
+            vol_5d = hist['Volume'].iloc[-5:].mean()
+            vol_60d = hist['Volume'].iloc[-60:].mean()
+            vol_breakout = (vol_5d / vol_60d) if vol_60d > 0 else 1.0
 
-        # 🆕 52주 신고가 근접도 (100에 가까울수록 신고가 부근)
-        high_52w = info.get('fiftyTwoWeekHigh', close_px)
-        high_52w_pct = (close_px / high_52w) * 100 if high_52w > 0 else 0
+            high_52w = info.get('fiftyTwoWeekHigh', close_px)
+            high_52w_pct = (close_px / high_52w) * 100 if high_52w > 0 else 0
 
-        return {
-            'Date': datetime.now().strftime("%Y-%m-%d"),
-            'Ticker': ticker, 'Name': name, 'Sector': sector, 'Close': close_px,
-            'Trend_OK': trend_ok,
-            'EPS_Growth': eps_growth,          # 기존 스프레드 (폴백)
-            'ForwardEps_Raw': eps_fwd,         # 🆕 리비전 트래킹용 원본
-            'Mom_3M': mom_3m,
-            'MA20_Disparity': ma20_disparity,
-            'RS_Rating': rs_rating,
-            'Volume_Breakout': vol_breakout,
-            'High_52W_Pct': high_52w_pct,      # 🆕 선행 지표
-            'Revision_7D': 0.0,                # 🆕 아래에서 채워짐
-            'Revision_30D': 0.0,               # 🆕 아래에서 채워짐
-            'Target': np.nan
-        }
+            return {
+                'Date': datetime.now().strftime("%Y-%m-%d"),
+                'Ticker': ticker, 'Name': name, 'Sector': sector, 'Close': close_px,
+                'Trend_OK': trend_ok,
+                'EPS_Growth': eps_growth,
+                'ForwardEps_Raw': eps_fwd,
+                'Mom_3M': mom_3m,
+                'MA20_Disparity': ma20_disparity,
+                'RS_Rating': rs_rating,
+                'Volume_Breakout': vol_breakout,
+                'High_52W_Pct': high_52w_pct,
+                'Revision_7D': 0.0,
+                'Revision_30D': 0.0,
+                'Target': np.nan
+            }
         except Exception:
             if attempt < 2:
-                time.sleep(1 + attempt)  # 1초, 2초 대기 후 재시도
+                time.sleep(1 + attempt)
                 continue
             return None
 
