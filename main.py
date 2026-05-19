@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore")
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
-MAX_WORKERS = 10
+MAX_WORKERS = 20
 HISTORY_FILE = 'history.csv'
 EPS_HISTORY_FILE = 'eps_history.csv'  # 🆕 리비전 자체 트래킹용
 
@@ -61,61 +61,56 @@ def get_market_baseline():
 # 2. 증거 수집 (52주 신고가 근접도 + EPS 원본 저장)
 # ==========================================
 def fetch_evidence(ticker, start_date, end_date, spy_ret_3m):
-    for attempt in range(3):
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
 
-            if info.get('marketCap', 0) < 2_000_000_000: return None
-            sector = info.get('sector', 'Unknown')
-            if sector in EXCLUDED_SECTORS: return None
+        if info.get('marketCap', 0) < 2_000_000_000: return None
+        sector = info.get('sector', 'Unknown')
+        if sector in EXCLUDED_SECTORS: return None
 
-            name = info.get('shortName', ticker)
-            hist = stock.history(start=start_date, end=end_date)
-            if len(hist) < 65: return None
+        name = info.get('shortName', ticker)
+        hist = stock.history(start=start_date, end=end_date)
+        if len(hist) < 65: return None
 
-            close_px = hist['Close'].iloc[-1]
+        close_px = hist['Close'].iloc[-1]
 
-            ma20 = hist['Close'].rolling(20).mean().iloc[-1]
-            ma60 = hist['Close'].rolling(60).mean().iloc[-1]
-            trend_ok = 1 if (close_px > ma20 > ma60) else 0
+        ma20 = hist['Close'].rolling(20).mean().iloc[-1]
+        ma60 = hist['Close'].rolling(60).mean().iloc[-1]
+        trend_ok = 1 if (close_px > ma20 > ma60) else 0
 
-            eps_trl = info.get('trailingEps', 0.1)
-            eps_fwd = info.get('forwardEps', 0)
-            eps_growth = ((eps_fwd - eps_trl) / abs(eps_trl)) * 100 if eps_trl != 0 else 0
+        eps_trl = info.get('trailingEps', 0.1)
+        eps_fwd = info.get('forwardEps', 0)
+        eps_growth = ((eps_fwd - eps_trl) / abs(eps_trl)) * 100 if eps_trl != 0 else 0
 
-            price_3m = hist['Close'].iloc[-63]
-            mom_3m = ((close_px / price_3m) - 1) * 100
+        price_3m = hist['Close'].iloc[-63]
+        mom_3m = ((close_px / price_3m) - 1) * 100
 
-            ma20_disparity = (close_px / ma20) * 100 if ma20 > 0 else 100
-            rs_rating = mom_3m - spy_ret_3m
-            vol_5d = hist['Volume'].iloc[-5:].mean()
-            vol_60d = hist['Volume'].iloc[-60:].mean()
-            vol_breakout = (vol_5d / vol_60d) if vol_60d > 0 else 1.0
+        ma20_disparity = (close_px / ma20) * 100 if ma20 > 0 else 100
+        rs_rating = mom_3m - spy_ret_3m
+        vol_5d = hist['Volume'].iloc[-5:].mean()
+        vol_60d = hist['Volume'].iloc[-60:].mean()
+        vol_breakout = (vol_5d / vol_60d) if vol_60d > 0 else 1.0
 
-            high_52w = info.get('fiftyTwoWeekHigh', close_px)
-            high_52w_pct = (close_px / high_52w) * 100 if high_52w > 0 else 0
+        high_52w = info.get('fiftyTwoWeekHigh', close_px)
+        high_52w_pct = (close_px / high_52w) * 100 if high_52w > 0 else 0
 
-            return {
-                'Date': datetime.now().strftime("%Y-%m-%d"),
-                'Ticker': ticker, 'Name': name, 'Sector': sector, 'Close': close_px,
-                'Trend_OK': trend_ok,
-                'EPS_Growth': eps_growth,
-                'ForwardEps_Raw': eps_fwd,
-                'Mom_3M': mom_3m,
-                'MA20_Disparity': ma20_disparity,
-                'RS_Rating': rs_rating,
-                'Volume_Breakout': vol_breakout,
-                'High_52W_Pct': high_52w_pct,
-                'Revision_7D': 0.0,
-                'Revision_30D': 0.0,
-                'Target': np.nan
-            }
-        except Exception:
-            if attempt < 2:
-                time.sleep(1 + attempt)
-                continue
-            return None
+        return {
+            'Date': datetime.now().strftime("%Y-%m-%d"),
+            'Ticker': ticker, 'Name': name, 'Sector': sector, 'Close': close_px,
+            'Trend_OK': trend_ok,
+            'EPS_Growth': eps_growth,
+            'ForwardEps_Raw': eps_fwd,
+            'Mom_3M': mom_3m,
+            'MA20_Disparity': ma20_disparity,
+            'RS_Rating': rs_rating,
+            'Volume_Breakout': vol_breakout,
+            'High_52W_Pct': high_52w_pct,
+            'Revision_7D': 0.0,
+            'Revision_30D': 0.0,
+            'Target': np.nan
+        }
+    except: return None
 
 # ==========================================
 # 3. 🆕 자체 리비전 트래킹 (자동 누적, 자동 계산)
@@ -212,7 +207,6 @@ def manage_historical_data(today_df):
             all_close = {}
             for i in range(0, len(t_list), 50):
                 batch = t_list[i:i+50]
-                if i > 0: time.sleep(2)  # 배치 간 2초 대기 (야후 차단 방지)
                 try:
                     hist_data = yf.download(batch, period="3mo", progress=False)
                     
