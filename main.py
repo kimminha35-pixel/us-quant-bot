@@ -194,6 +194,14 @@ def manage_historical_data(today_df):
         except: history_df = pd.DataFrame()
     else: history_df = pd.DataFrame()
 
+    # 🔄 채점 방식 변경 — 1회성 Target 리셋 (이진 MDD 필터로 전환)
+    reset_flag = 'scoring_v2_done.flag'
+    if not history_df.empty and not os.path.exists(reset_flag):
+        old_count = history_df['Target'].notna().sum()
+        history_df['Target'] = np.nan
+        with open(reset_flag, 'w') as f: f.write('done')
+        print(f"🔄 채점 방식 변경으로 Target {old_count}행 리셋 완료 (1회성)")
+
     if not history_df.empty:
         history_df = history_df.dropna(subset=['Date'])
         today_date = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
@@ -250,7 +258,13 @@ def manage_historical_data(today_df):
                     last_px = float(period_data.iloc[-1])
                     mdd_pct = max(0, ((buy_price - min_px) / buy_price) * 100)
                     ret_pct = ((last_px - buy_price) / buy_price) * 100
-                    risk_adjusted_score = ret_pct - (mdd_pct * 1.5)
+                    
+                    # MDD 이진 필터: 15% 이상 빠진 건 대실패, 아니면 수익률 그대로
+                    if mdd_pct >= 15:
+                        risk_adjusted_score = ret_pct * 0.3
+                    else:
+                        risk_adjusted_score = ret_pct
+                        
                     history_df.at[idx, 'Target'] = risk_adjusted_score
                     scored += 1
                     
