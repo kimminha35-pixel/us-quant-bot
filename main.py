@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore")
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
-MAX_WORKERS = 20
+MAX_WORKERS = 10
 HISTORY_FILE = 'history.csv'
 EPS_HISTORY_FILE = 'eps_history.csv'  # 🆕 리비전 자체 트래킹용
 
@@ -61,17 +61,18 @@ def get_market_baseline():
 # 2. 증거 수집 (52주 신고가 근접도 + EPS 원본 저장)
 # ==========================================
 def fetch_evidence(ticker, start_date, end_date, spy_ret_3m):
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
+    for attempt in range(3):
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
 
-        if info.get('marketCap', 0) < 2_000_000_000: return None
-        sector = info.get('sector', 'Unknown')
-        if sector in EXCLUDED_SECTORS: return None
+            if info.get('marketCap', 0) < 2_000_000_000: return None
+            sector = info.get('sector', 'Unknown')
+            if sector in EXCLUDED_SECTORS: return None
 
-        name = info.get('shortName', ticker)
-        hist = stock.history(start=start_date, end=end_date)
-        if len(hist) < 65: return None
+            name = info.get('shortName', ticker)
+            hist = stock.history(start=start_date, end=end_date)
+            if len(hist) < 65: return None
 
         close_px = hist['Close'].iloc[-1]
 
@@ -112,7 +113,11 @@ def fetch_evidence(ticker, start_date, end_date, spy_ret_3m):
             'Revision_30D': 0.0,               # 🆕 아래에서 채워짐
             'Target': np.nan
         }
-    except: return None
+        except Exception:
+            if attempt < 2:
+                time.sleep(1 + attempt)  # 1초, 2초 대기 후 재시도
+                continue
+            return None
 
 # ==========================================
 # 3. 🆕 자체 리비전 트래킹 (자동 누적, 자동 계산)
@@ -209,8 +214,9 @@ def manage_historical_data(today_df):
             all_close = {}
             for i in range(0, len(t_list), 50):
                 batch = t_list[i:i+50]
+                if i > 0: time.sleep(2)  # 배치 간 2초 대기 (야후 차단 방지)
                 try:
-                    hist_data = yf.download(batch, period="3mo", progress=False, show_errors=False)
+                    hist_data = yf.download(batch, period="3mo", progress=False)
                     
                     # MultiIndex 컬럼 대응
                     if isinstance(hist_data.columns, pd.MultiIndex):
