@@ -203,27 +203,60 @@ def manage_historical_data(today_df):
 
         if not tickers_to_update.empty:
             t_list = tickers_to_update['Ticker'].unique().tolist()
-            try:
-                hist_data = yf.download(t_list, period="1mo", progress=False, show_errors=False)
-                close_data = hist_data['Close'] if 'Close' in hist_data else hist_data
-                if isinstance(close_data, pd.Series): close_data = close_data.to_frame(name=t_list[0])
-
-                for idx, row in tickers_to_update.iterrows():
-                    ticker = row['Ticker']
-                    buy_date = pd.to_datetime(row['Date'])
-                    buy_price = row['Close']
-                    if ticker in close_data.columns:
-                        period_data = close_data[ticker].dropna()
-                        period_data = period_data[period_data.index.tz_localize(None) >= buy_date]
-                        if not period_data.empty:
-                            min_px = float(period_data.min())
-                            last_px = float(period_data.iloc[-1])
-                            mdd_pct = max(0, ((buy_price - min_px) / buy_price) * 100)
-                            ret_pct = ((last_px - buy_price) / buy_price) * 100
-                            risk_adjusted_score = ret_pct - (mdd_pct * 1.5)
-                            history_df.at[idx, 'Target'] = risk_adjusted_score
-            except Exception as e:
-                print(f"채점 중 에러: {e}")
+            print(f"📝 채점 대상: {len(t_list)}개 티커, {len(tickers_to_update)}행")
+            
+            # 배치 다운로드 (50개씩 끊어서 타임아웃 방지)
+            all_close = {}
+            for i in range(0, len(t_list), 50):
+                batch = t_list[i:i+50]
+                try:
+                    hist_data = yf.download(batch, period="3mo", progress=False, show_errors=False)
+                    
+                    # MultiIndex 컬럼 대응
+                    if isinstance(hist_data.columns, pd.MultiIndex):
+                        close_data = hist_data['Close']
+                    elif 'Close' in hist_data.columns:
+                        close_data = hist_data[['Close']]
+                        close_data.columns = [batch[0]] if len(batch) == 1 else close_data.columns
+                    else:
+                        continue
+                    
+                    if isinstance(close_data, pd.Series):
+                        close_data = close_data.to_frame(name=batch[0])
+                    
+                    # timezone 제거 (핵심 버그 수정)
+                    if close_data.index.tz is not None:
+                        close_data.index = close_data.index.tz_localize(None)
+                    
+                    for col in close_data.columns:
+                        all_close[col] = close_data[col].dropna()
+                        
+                except Exception as e:
+                    print(f"  ⚠️ 배치 {i}~{i+len(batch)} 다운로드 실패: {e}")
+            
+            # 채점 실행
+            scored = 0
+            for idx, row in tickers_to_update.iterrows():
+                ticker = row['Ticker']
+                buy_date = pd.to_datetime(row['Date'])
+                buy_price = row['Close']
+                
+                if ticker not in all_close:
+                    continue
+                    
+                period_data = all_close[ticker]
+                period_data = period_data[period_data.index >= buy_date]
+                
+                if not period_data.empty:
+                    min_px = float(period_data.min())
+                    last_px = float(period_data.iloc[-1])
+                    mdd_pct = max(0, ((buy_price - min_px) / buy_price) * 100)
+                    ret_pct = ((last_px - buy_price) / buy_price) * 100
+                    risk_adjusted_score = ret_pct - (mdd_pct * 1.5)
+                    history_df.at[idx, 'Target'] = risk_adjusted_score
+                    scored += 1
+                    
+            print(f"✅ 채점 완료: {scored}행 / {len(tickers_to_update)}행")
 
     today_df['Date'] = pd.to_datetime(today_df['Date'])
     updated_history = pd.concat([history_df, today_df], ignore_index=True).drop_duplicates(subset=['Date', 'Ticker'], keep='last')
@@ -236,19 +269,13 @@ def manage_historical_data(today_df):
 def dynamic_ml_filter(history_df, today_df):
     train_data = history_df.dropna(subset=['Target'])
 
-    # --- 🆕 Revision_Strength 결정: 진짜 리비전 → 폴백 순서 ---
-    # 리비전 데이터가 있으면 그걸 쓰고, 없으면 기존 EPS_Growth로 폴백
     has_real_revision = (today_df['Revision_7D'] != 0).any() or (today_df['Revision_30D'] != 0).any()
-
     if has_real_revision:
-        # 7일 리비전(단기 모멘텀) 가중 + 30일 리비전(추세 확인)
-        today_df['Revision_Strength'] = today_df['Revision_7D'] * 0.6 + today_df['Revision_30D'] * 0.4
         print("✅ 진짜 리비전 데이터 사용 중 (선행적)")
     else:
-        today_df['Revision_Strength'] = today_df['EPS_Growth']
         print("⏳ 리비전 데이터 축적 중 — EPS 스프레드(폴백)로 대체")
 
-    # --- 룰 기반 점수 (52주 신고가 근접도 추가) ---
+    # --- 룰 기반 점수 ---
     features = ['Trend_OK', 'Revision_Strength', 'Mom_3M']
 
     rev_norm = np.clip(today_df['Revision_Strength'] / 100, -1, 1)
@@ -368,6 +395,12 @@ if __name__ == "__main__":
         today_df = track_and_compute_revision(today_df)
 
         has_real_revision = (today_df['Revision_7D'] != 0).any() or (today_df['Revision_30D'] != 0).any()
+
+        # Revision_Strength를 저장 전에 확정 (ML 학습 데이터 일관성)
+        if has_real_revision:
+            today_df['Revision_Strength'] = today_df['Revision_7D'] * 0.6 + today_df['Revision_30D'] * 0.4
+        else:
+            today_df['Revision_Strength'] = today_df['EPS_Growth']
 
         history_df = manage_historical_data(today_df)
         ranked_df = dynamic_ml_filter(history_df, today_df)
