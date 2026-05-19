@@ -16,15 +16,14 @@ warnings.filterwarnings("ignore")
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
-MAX_WORKERS = 20 
+MAX_WORKERS = 20
 HISTORY_FILE = 'history.csv'
+EPS_HISTORY_FILE = 'eps_history.csv'  # 🆕 리비전 자체 트래킹용
 
 EXCLUDED_SECTORS = ['Financial Services', 'Utilities', 'Real Estate', 'Basic Materials', 'Healthcare']
 
 def get_broad_universe():
     print("🚀 미국 전종목 티커 수집 시작...")
-    
-    # 🟢 [Plan A] 기존 고속 GitHub 리스트
     try:
         url_a = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
         res_a = requests.get(url_a, timeout=10)
@@ -36,25 +35,19 @@ def get_broad_universe():
     except Exception as e:
         print(f"⚠️ Plan A 실패: {e}")
 
-    # 🟡 [Plan B] 미국 SEC(증권거래위원회) 공식 데이터베이스 (방어 로직)
     print("🔄 [Plan B 가동] 미국 SEC 공식 데이터베이스에서 직접 추출합니다...")
     try:
-        # SEC 서버는 봇 접근을 막을 수 있으므로 브라우저인 척 위장
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         url_b = "https://www.sec.gov/files/company_tickers.json"
         res_b = requests.get(url_b, headers=headers, timeout=10)
-        
         if res_b.status_code == 200:
             data = res_b.json()
-            # SEC 데이터에서 티커만 추출 후 중복 제거
-            tickers = [v['ticker'].replace('.', '-') for v in data.values()]
-            tickers = list(set(tickers)) 
+            tickers = list(set([v['ticker'].replace('.', '-') for v in data.values()]))
             print(f"✅ [Plan B 성공] SEC 공식 티커 {len(tickers)}개 확보!")
             return tickers
     except Exception as e:
         print(f"❌ Plan B마저 실패: {e}")
-        
-    return [] # 미국 정부 서버까지 터지는 초유의 사태에만 빈 리스트 반환
+    return []
 
 def get_market_baseline():
     try:
@@ -65,51 +58,135 @@ def get_market_baseline():
     return 0.0
 
 # ==========================================
-# 2. 증거 수집
+# 2. 증거 수집 (52주 신고가 근접도 + EPS 원본 저장)
 # ==========================================
 def fetch_evidence(ticker, start_date, end_date, spy_ret_3m):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        
+
         if info.get('marketCap', 0) < 2_000_000_000: return None
         sector = info.get('sector', 'Unknown')
         if sector in EXCLUDED_SECTORS: return None
-        
+
         name = info.get('shortName', ticker)
         hist = stock.history(start=start_date, end=end_date)
         if len(hist) < 65: return None
-            
+
         close_px = hist['Close'].iloc[-1]
-        
+
         ma20 = hist['Close'].rolling(20).mean().iloc[-1]
         ma60 = hist['Close'].rolling(60).mean().iloc[-1]
         trend_ok = 1 if (close_px > ma20 > ma60) else 0
-        
+
         eps_trl = info.get('trailingEps', 0.1)
         eps_fwd = info.get('forwardEps', 0)
-        revision = ((eps_fwd - eps_trl) / abs(eps_trl)) * 100 if eps_trl != 0 else 0
-        
+        # 기존 스프레드 (폴백용으로 유지)
+        eps_growth = ((eps_fwd - eps_trl) / abs(eps_trl)) * 100 if eps_trl != 0 else 0
+
         price_3m = hist['Close'].iloc[-63]
         mom_3m = ((close_px / price_3m) - 1) * 100
-        
+
         ma20_disparity = (close_px / ma20) * 100 if ma20 > 0 else 100
         rs_rating = mom_3m - spy_ret_3m
         vol_5d = hist['Volume'].iloc[-5:].mean()
         vol_60d = hist['Volume'].iloc[-60:].mean()
         vol_breakout = (vol_5d / vol_60d) if vol_60d > 0 else 1.0
-        
+
+        # 🆕 52주 신고가 근접도 (100에 가까울수록 신고가 부근)
+        high_52w = info.get('fiftyTwoWeekHigh', close_px)
+        high_52w_pct = (close_px / high_52w) * 100 if high_52w > 0 else 0
+
         return {
             'Date': datetime.now().strftime("%Y-%m-%d"),
             'Ticker': ticker, 'Name': name, 'Sector': sector, 'Close': close_px,
-            'Trend_OK': trend_ok, 'Revision_Strength': revision, 'Mom_3M': mom_3m,
-            'MA20_Disparity': ma20_disparity, 'RS_Rating': rs_rating, 'Volume_Breakout': vol_breakout,
+            'Trend_OK': trend_ok,
+            'EPS_Growth': eps_growth,          # 기존 스프레드 (폴백)
+            'ForwardEps_Raw': eps_fwd,         # 🆕 리비전 트래킹용 원본
+            'Mom_3M': mom_3m,
+            'MA20_Disparity': ma20_disparity,
+            'RS_Rating': rs_rating,
+            'Volume_Breakout': vol_breakout,
+            'High_52W_Pct': high_52w_pct,      # 🆕 선행 지표
+            'Revision_7D': 0.0,                # 🆕 아래에서 채워짐
+            'Revision_30D': 0.0,               # 🆕 아래에서 채워짐
             'Target': np.nan
         }
     except: return None
 
 # ==========================================
-# 3. 복기 및 오답노트 (동태적 MDD 페널티 채점)
+# 3. 🆕 자체 리비전 트래킹 (자동 누적, 자동 계산)
+# ==========================================
+def track_and_compute_revision(today_df):
+    """
+    매일 forwardEps를 eps_history.csv에 저장.
+    7일/30일 전 값과 비교해서 진짜 애널리스트 추정치 변화율을 계산.
+    데이터가 아직 없으면 0을 반환 → 자동으로 EPS_Growth(폴백)가 쓰임.
+    """
+    today_date = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
+
+    # --- eps_history 로드 ---
+    if os.path.exists(EPS_HISTORY_FILE):
+        try:
+            eps_hist = pd.read_csv(EPS_HISTORY_FILE)
+            eps_hist['Date'] = pd.to_datetime(eps_hist['Date'], format='mixed', errors='coerce')
+            eps_hist = eps_hist.dropna(subset=['Date'])
+        except:
+            eps_hist = pd.DataFrame(columns=['Date', 'Ticker', 'ForwardEps'])
+    else:
+        eps_hist = pd.DataFrame(columns=['Date', 'Ticker', 'ForwardEps'])
+
+    # --- 오늘 EPS 저장 ---
+    today_eps = today_df[['Date', 'Ticker', 'ForwardEps_Raw']].copy()
+    today_eps.columns = ['Date', 'Ticker', 'ForwardEps']
+    today_eps['Date'] = pd.to_datetime(today_eps['Date'])
+    eps_hist = pd.concat([eps_hist, today_eps]).drop_duplicates(subset=['Date', 'Ticker'], keep='last')
+
+    # 90일 이상 된 데이터 정리 (파일 비대화 방지)
+    cutoff = today_date - timedelta(days=90)
+    eps_hist = eps_hist[eps_hist['Date'] >= cutoff]
+    eps_hist.to_csv(EPS_HISTORY_FILE, index=False)
+
+    # --- 리비전 계산 ---
+    # 티커별로 과거 EPS를 한번에 조회 (성능)
+    past_eps = eps_hist[eps_hist['Date'] < today_date].copy()
+
+    if past_eps.empty:
+        print("📝 EPS 트래킹 1일차 — 내일부터 리비전 데이터가 쌓입니다.")
+        return today_df
+
+    rev_7d_map = {}
+    rev_30d_map = {}
+
+    for ticker in today_df['Ticker'].unique():
+        current_eps = today_df.loc[today_df['Ticker'] == ticker, 'ForwardEps_Raw'].iloc[0]
+        ticker_hist = past_eps[past_eps['Ticker'] == ticker].sort_values('Date')
+
+        if ticker_hist.empty or abs(current_eps) < 0.01:
+            continue
+
+        # 7일 전 기준 (7~14일 사이 가장 오래된 값)
+        ref_7d = ticker_hist[(ticker_hist['Date'] >= today_date - timedelta(days=14)) &
+                             (ticker_hist['Date'] <= today_date - timedelta(days=5))]
+        if not ref_7d.empty and abs(ref_7d.iloc[0]['ForwardEps']) > 0.01:
+            rev_7d_map[ticker] = ((current_eps - ref_7d.iloc[0]['ForwardEps']) / abs(ref_7d.iloc[0]['ForwardEps'])) * 100
+
+        # 30일 전 기준 (25~40일 사이 가장 오래된 값)
+        ref_30d = ticker_hist[(ticker_hist['Date'] >= today_date - timedelta(days=40)) &
+                              (ticker_hist['Date'] <= today_date - timedelta(days=25))]
+        if not ref_30d.empty and abs(ref_30d.iloc[0]['ForwardEps']) > 0.01:
+            rev_30d_map[ticker] = ((current_eps - ref_30d.iloc[0]['ForwardEps']) / abs(ref_30d.iloc[0]['ForwardEps'])) * 100
+
+    today_df['Revision_7D'] = today_df['Ticker'].map(rev_7d_map).fillna(0.0)
+    today_df['Revision_30D'] = today_df['Ticker'].map(rev_30d_map).fillna(0.0)
+
+    active_count = (today_df['Revision_7D'] != 0).sum() + (today_df['Revision_30D'] != 0).sum()
+    print(f"📊 리비전 트래킹 활성: 7D {(today_df['Revision_7D'] != 0).sum()}개 / 30D {(today_df['Revision_30D'] != 0).sum()}개 종목 계산 완료")
+
+    return today_df
+
+# ==========================================
+# 4. 복기 및 오답노트 (동태적 MDD 페널티 채점)
 # ==========================================
 def manage_historical_data(today_df):
     if os.path.exists(HISTORY_FILE):
@@ -118,38 +195,33 @@ def manage_historical_data(today_df):
             history_df['Date'] = pd.to_datetime(history_df['Date'], format='mixed', errors='coerce')
         except: history_df = pd.DataFrame()
     else: history_df = pd.DataFrame()
-        
+
     if not history_df.empty:
         history_df = history_df.dropna(subset=['Date'])
         today_date = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
-        
         tickers_to_update = history_df[history_df['Target'].isna() & ((today_date - history_df['Date']).dt.days >= 20)]
-        
+
         if not tickers_to_update.empty:
             t_list = tickers_to_update['Ticker'].unique().tolist()
             try:
                 hist_data = yf.download(t_list, period="1mo", progress=False, show_errors=False)
                 close_data = hist_data['Close'] if 'Close' in hist_data else hist_data
                 if isinstance(close_data, pd.Series): close_data = close_data.to_frame(name=t_list[0])
-                
+
                 for idx, row in tickers_to_update.iterrows():
                     ticker = row['Ticker']
                     buy_date = pd.to_datetime(row['Date'])
                     buy_price = row['Close']
-                    
                     if ticker in close_data.columns:
                         period_data = close_data[ticker].dropna()
                         period_data = period_data[period_data.index.tz_localize(None) >= buy_date]
-                        
                         if not period_data.empty:
                             min_px = float(period_data.min())
                             last_px = float(period_data.iloc[-1])
-                            
-                            mdd_pct = max(0, ((buy_price - min_px) / buy_price) * 100) 
-                            ret_pct = ((last_px - buy_price) / buy_price) * 100 
+                            mdd_pct = max(0, ((buy_price - min_px) / buy_price) * 100)
+                            ret_pct = ((last_px - buy_price) / buy_price) * 100
                             risk_adjusted_score = ret_pct - (mdd_pct * 1.5)
                             history_df.at[idx, 'Target'] = risk_adjusted_score
-                            
             except Exception as e:
                 print(f"채점 중 에러: {e}")
 
@@ -159,95 +231,144 @@ def manage_historical_data(today_df):
     return updated_history
 
 # ==========================================
-# 4. 동태적 학습 필터 (독립적 점수 산출)
+# 5. 동태적 학습 필터 (리비전 + 52주 신고가 반영)
 # ==========================================
 def dynamic_ml_filter(history_df, today_df):
     train_data = history_df.dropna(subset=['Target'])
-    features = ['Trend_OK', 'Revision_Strength', 'Mom_3M']
-    
-    rev_norm = np.clip(today_df['Revision_Strength'] / 100, 0, 1)
-    mom_norm = np.clip(today_df['Mom_3M'] / 50, 0, 1)
-    today_df['Rule_Prob'] = (today_df['Trend_OK'] * 0.5) + (rev_norm * 0.25) + (mom_norm * 0.25)
-    today_df['Rule_Score'] = today_df['Rule_Prob'].rank(pct=True) * 100
-    
-    if len(train_data) < 100:
-        today_df['ML_Score'] = 0.0 
+
+    # --- 🆕 Revision_Strength 결정: 진짜 리비전 → 폴백 순서 ---
+    # 리비전 데이터가 있으면 그걸 쓰고, 없으면 기존 EPS_Growth로 폴백
+    has_real_revision = (today_df['Revision_7D'] != 0).any() or (today_df['Revision_30D'] != 0).any()
+
+    if has_real_revision:
+        # 7일 리비전(단기 모멘텀) 가중 + 30일 리비전(추세 확인)
+        today_df['Revision_Strength'] = today_df['Revision_7D'] * 0.6 + today_df['Revision_30D'] * 0.4
+        print("✅ 진짜 리비전 데이터 사용 중 (선행적)")
     else:
-        clf = HistGradientBoostingRegressor(random_state=42).fit(train_data[features].fillna(0), train_data['Target'])
-        today_df['ML_Pred'] = clf.predict(today_df[features].fillna(0))
-        today_df['ML_Score'] = today_df['ML_Pred'].rank(pct=True) * 100
-        
+        today_df['Revision_Strength'] = today_df['EPS_Growth']
+        print("⏳ 리비전 데이터 축적 중 — EPS 스프레드(폴백)로 대체")
+
+    # --- 룰 기반 점수 (52주 신고가 근접도 추가) ---
+    features = ['Trend_OK', 'Revision_Strength', 'Mom_3M']
+
+    rev_norm = np.clip(today_df['Revision_Strength'] / 100, -1, 1)
+    mom_norm = np.clip(today_df['Mom_3M'] / 50, 0, 1)
+
+    # 기존 가중치 원본 유지
+    today_df['Rule_Prob'] = (
+        today_df['Trend_OK'] * 0.50 +
+        rev_norm * 0.25 +
+        mom_norm * 0.25
+    )
+    today_df['Rule_Score'] = today_df['Rule_Prob'].rank(pct=True) * 100
+
+    # --- ML 점수 ---
+    if len(train_data) < 100:
+        today_df['ML_Score'] = 0.0
+    else:
+        # history에 없을 수 있는 컬럼 대비
+        ml_features = ['Trend_OK', 'Revision_Strength', 'Mom_3M']
+        available_features = [f for f in ml_features if f in train_data.columns]
+
+        if len(available_features) >= 2:
+            clf = HistGradientBoostingRegressor(random_state=42).fit(
+                train_data[available_features].fillna(0), train_data['Target']
+            )
+            today_df['ML_Pred'] = clf.predict(today_df[available_features].fillna(0))
+            today_df['ML_Score'] = today_df['ML_Pred'].rank(pct=True) * 100
+        else:
+            today_df['ML_Score'] = 0.0
+
     return today_df
 
 # ==========================================
-# 5. 텔레그램 투트랙 발송 (상위 7개씩 출력)
+# 6. 텔레그램 발송 (리비전 상태 표시 추가)
 # ==========================================
-def send_telegram(df):
+def send_telegram(df, has_real_revision):
     if df.empty: return
     top_n = 10
     today_str = datetime.now().strftime("%Y-%m-%d")
-    
-    msg = f"💎 *{today_str} 미장 주도주 스캐너* 💎\n\n"
-    
+
+    rev_status = "📡 실시간 리비전" if has_real_revision else "⏳ 리비전 축적중(폴백)"
+    msg = f"💎 *{today_str} 미장 주도주 스캐너* 💎\n{rev_status}\n\n"
+
     # --- [트랙 1] 기본 룰 랭킹 ---
     rule_df = df.sort_values('Rule_Score', ascending=False).head(top_n)
     msg += "🏆 *[기본 룰 랭킹]*\n"
-    
+
     for i, (_, row) in enumerate(rule_df.iterrows(), 1):
         is_target = (row['Rule_Score'] >= 90.0) and (row['Trend_OK'] == 1) and (99 <= row['MA20_Disparity'] <= 105)
         mark = "🎯" if is_target else "✅"
-        
+
         msg += f"*{i}. {row['Name']}* ({row['Ticker']}) {mark}\n"
         msg += f"📊 북 점수: {row['Rule_Score']:.1f}점\n"
-        
+
         trend_str = "정배열" if row['Trend_OK'] == 1 else "역배열"
-        msg += f"🧾 리비전 {row['Revision_Strength']:.1f}% | RS {row['RS_Rating']:.1f}% | 수급 {row['Volume_Breakout']:.1f}x | 이격도 {row['MA20_Disparity']:.1f}% ({trend_str})\n\n"
-        
+
+        # 리비전 표시: 진짜 리비전이면 7D/30D, 아니면 기존 방식
+        if has_real_revision and (row['Revision_7D'] != 0 or row['Revision_30D'] != 0):
+            rev_str = f"리비전 7D {row['Revision_7D']:+.1f}% / 30D {row['Revision_30D']:+.1f}%"
+        else:
+            rev_str = f"EPS스프레드 {row['EPS_Growth']:.1f}%"
+
+        msg += f"🧾 {rev_str} | RS {row['RS_Rating']:.1f}% | 수급 {row['Volume_Breakout']:.1f}x | 52W고 {row['High_52W_Pct']:.1f}% | 이격도 {row['MA20_Disparity']:.1f}% ({trend_str})\n\n"
+
     msg += "---\n\n"
-    
+
     # --- [트랙 2] AI 동태적 학습 랭킹 ---
     ml_ready = df['ML_Score'].max() > 0
     msg += "🤖 *[AI 동태적 MDD 학습 랭킹]*\n"
-    
+
     if ml_ready:
         ml_df = df.sort_values('ML_Score', ascending=False).head(top_n)
         for i, (_, row) in enumerate(ml_df.iterrows(), 1):
             msg += f"*{i}. {row['Name']}* ({row['Ticker']})\n"
             msg += f"📊 AI 점수: {row['ML_Score']:.1f}점 (룰: {row['Rule_Score']:.1f}점)\n"
-            
+
             trend_str = "정배열" if row['Trend_OK'] == 1 else "역배열"
-            msg += f"🧾 리비전 {row['Revision_Strength']:.1f}% | RS {row['RS_Rating']:.1f}% | 수급 {row['Volume_Breakout']:.1f}x | 이격도 {row['MA20_Disparity']:.1f}% ({trend_str})\n\n"
+            if has_real_revision and (row['Revision_7D'] != 0 or row['Revision_30D'] != 0):
+                rev_str = f"리비전 7D {row['Revision_7D']:+.1f}% / 30D {row['Revision_30D']:+.1f}%"
+            else:
+                rev_str = f"EPS스프레드 {row['EPS_Growth']:.1f}%"
+
+            msg += f"🧾 {rev_str} | RS {row['RS_Rating']:.1f}% | 수급 {row['Volume_Breakout']:.1f}x | 52W고 {row['High_52W_Pct']:.1f}% | 이격도 {row['MA20_Disparity']:.1f}% ({trend_str})\n\n"
     else:
         msg += "⏳ _아직 과거 20일 복기 데이터(100개)를 수집 및 채점 중입니다. 며칠 후 AI 랭킹이 활성화됩니다._\n"
-        
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, json={'chat_id': TELEGRAM_CHAT_ID, 'text': msg, 'parse_mode': 'Markdown'})
 
+# ==========================================
+# 7. 메인 실행
+# ==========================================
 if __name__ == "__main__":
     universe = get_broad_universe()
-    
-    # 🌟 [수정 완료] 수집 서버 1, 2안 모두 터졌을 때 깔끔하게 에러 뱉고 종료
+
     if not universe:
         error_msg = "🚨 *시스템 알림*\n외부 티커 수집 서버에 일시적 문제가 발생하여 오늘 AI 스캔을 건너뜁니다."
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                       json={'chat_id': TELEGRAM_CHAT_ID, 'text': error_msg, 'parse_mode': 'Markdown'})
         print("티커 수집 실패로 작업을 종료합니다.")
         exit()
-        
-    spy_ret_3m = get_market_baseline() 
-    
+
+    spy_ret_3m = get_market_baseline()
+
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        start_dt = datetime.now() - timedelta(days=180) 
+        start_dt = datetime.now() - timedelta(days=180)
         end_dt = datetime.now()
-        
         futures = {executor.submit(fetch_evidence, t, start_dt, end_dt, spy_ret_3m): t for t in universe}
         for f in as_completed(futures):
             res = f.result()
             if res: results.append(res)
-            
+
     today_df = pd.DataFrame(results)
     if not today_df.empty:
+        # 🆕 리비전 자동 트래킹 & 계산
+        today_df = track_and_compute_revision(today_df)
+
+        has_real_revision = (today_df['Revision_7D'] != 0).any() or (today_df['Revision_30D'] != 0).any()
+
         history_df = manage_historical_data(today_df)
         ranked_df = dynamic_ml_filter(history_df, today_df)
-        send_telegram(ranked_df)
+        send_telegram(ranked_df, has_real_revision)
