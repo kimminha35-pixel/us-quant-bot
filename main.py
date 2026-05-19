@@ -195,11 +195,10 @@ def manage_historical_data(today_df):
     else: history_df = pd.DataFrame()
 
     # 🔄 채점 방식 변경 — 1회성 Target 리셋 (이진 MDD 필터로 전환)
-    reset_flag = 'scoring_v2_done.flag'
-    if not history_df.empty and not os.path.exists(reset_flag):
+    if not history_df.empty and 'Scoring_V' not in history_df.columns:
         old_count = history_df['Target'].notna().sum()
         history_df['Target'] = np.nan
-        with open(reset_flag, 'w') as f: f.write('done')
+        history_df['Scoring_V'] = 2
         print(f"🔄 채점 방식 변경으로 Target {old_count}행 리셋 완료 (1회성)")
 
     if not history_df.empty:
